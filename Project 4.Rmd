@@ -1,0 +1,181 @@
+---
+title: "Project 4 Census Data Analysis, Electric Vehicle Adoption, and Machine Learning on Breast Cancer Data"
+output: html_notebook
+---
+PART A
+
+Load Packages
+```{r}
+library(tidycensus)
+library(tidyverse)
+library(ggplot2)
+```
+Census API
+```{r}
+# census_api_key("d9d5f6a983065ff3b39af54a0727a840f7c40ecb", install = TRUE)
+readRenviron("~/.Renviron")
+Sys.getenv("CENSUS_API_KEY")
+```
+Get Census variables
+```{r}
+degree = get_acs(geography = "county", variables = "B15003_022")
+residents = get_acs(geography = "county", variables = "B15003_001")
+median_income = get_acs(geography = "county", variables = "B19013_001")
+```
+Merge 3 datasets into 1
+```{r}
+degree_residents = merge(degree, residents, by = "GEOID")
+degree_residents = degree_residents[c(1,2,4,8)]
+census_1 = merge(median_income, degree_residents, by = "GEOID")
+census_1 = census_1[c(1,2,4,7,8)]
+colnames(census_1) = c("GEOID", "County", "Med_Income", "Over_25_Degree", "Adult_Residents")
+```
+Create new variable - Percentage of degreed adult residents over 25 years old.
+```{r}
+census_1$Per_Degree = as.numeric(census_1$`Over_25_Degree`/census_1$`Adult_Residents`)
+```
+Plot Log Med Income against Percentage of Degrees. The Log median income and Percentage of degreed residents are highly positive correlated.
+```{r}
+census_1$region = ifelse(census_1$GEOID <72000, "U.S.","Puerto Rico")
+gg = ggplot(census_1,aes(x = Per_Degree,y = Med_Income, color = region)) + geom_point()
+gg = gg + ggtitle("The Correlation between Education and Income by U.S. County")
+gg = gg + labs(x="% 25 Years Older with College Degree",y="Median Income")
+gg
+```
+Run simple regression model with Log Med Income as the dependent variable and Percentage of degrees as the independent variable.This simple linear regression model shows that percentage of degreed residents is significant predictor variable for the log median income. The 32% r^2 is good considering this model only has one predictor variable.
+```{r}
+censusfit_1 = lm(log(Med_Income) ~ Per_Degree, data=census_1)
+summary(censusfit_1)
+```
+
+PART B
+
+Load Packages
+```{r}
+library(readxl)  
+library(dplyr)
+```
+Load datasets
+```{r}
+mincome = read_excel("ACS_17_5YR_S1903.xlsx")
+education = read_excel("ACS_17_5YR_S1501.xlsx")
+dmv = read_excel("dmv_zip.xlsx")
+```
+Data manipulation for Median Income and Education datasets
+```{r}
+mincome = mincome[c(2,8)]
+colnames(mincome) = c("id", "income")
+mincome$income = as.numeric(gsub("-", "NA", mincome$income))
+
+education = education[,c(2,64,78,90,102,114,126,138,150,184,220,256,292)]
+colnames(education) = c("id", "pop17", "below9", "g912", "hs", "scollege", "associate", "bachelor", "higher", "p2534", "p3544", "p4564", "p65a")
+education[,3:9] = sapply(education[,3:9],as.numeric)
+education$chci = as.numeric((education$below9*50)+
+                              (education$g912*100)+
+                              (education$hs*120)+
+                              (education$scollege*130)+
+                              (education$associate*140)+
+                              (education$bachelor*190)+
+                              (education$higher*230))/100
+```
+Merge 3 datasets into 1
+```{r}
+newdata = merge(mincome, education, by = "id")
+newdata1 = merge(newdata, dmv, by = "id")
+```
+Change population demographics to percentages
+```{r}
+newdata1$p2534 = as.numeric(newdata1$p2534/newdata1$pop17)
+newdata1$p3544 = as.numeric(newdata1$p3544/newdata1$pop17)
+newdata1$p4564 = as.numeric(newdata1$p4564/newdata1$pop17)
+newdata1$p65a = as.numeric(newdata1$p65a/newdata1$pop17)
+```
+Linear regression model with EV adoption rate as the dependent variable and median income, pecentage of 25-34 yr olds, percentage of 35-44 yr olds, and chci as the predictors. This linear model has 4 highly correlated predictor variables to predict EV adoption rate. The 60% r^2 shows that these 4 variables can highly explain the dependent variable.
+```{r}
+EVfit_1 = lm(p_beph~income+p2534+p3544+chci,data=newdata1)
+summary(EVfit_1)
+```
+Simple scatter plot
+```{r}
+b = ggplot(newdata1, aes(income, p_beph))
+b + geom_point()
+```
+PART C
+
+
+Load Packages
+```{r}
+library(tree)
+library(boot)
+library(caret)
+library(e1071)
+library(arm)
+library(xgboost)
+library(lattice)
+library(rattle)
+library(kernlab)
+library(rpart)
+```
+Load and manipulate Breast Cancer dataset from UCI
+```{r}
+uciwd ="https://archive.ics.uci.edu/ml/machine-learning-databases/"
+mldata = paste(uciwd,"breast-cancer-wisconsin/breast-cancer-wisconsin.data", sep="")
+bcancer = read.csv(mldata, header=F) # Treat the data begins from the first row
+colnames(bcancer)=c("ID","clump_thick","cell_size","cell_shape", "marginal","epithelial","nuclei",
+                    "chromatin","nucleoli","mitoses","class")
+```
+More data manipulation
+```{r}
+bcancer$nuclei = as.numeric(gsub("\\?","NA",bcancer$nuclei))
+bcancer = na.omit(bcancer)
+bcancer$class = as.factor(ifelse(bcancer$class == 2, 0, 1))
+```
+Tree model and tree plot
+```{r}
+tree.bcancer=rpart(class~.,data=bcancer)
+summary(tree.bcancer)
+fancyRpartPlot(tree.bcancer, main = BreastCancerModel)
+```
+10 fold cross validation on 7 different models.
+```{r}
+control = trainControl(method="cv", number=10)
+metric = "Accuracy"
+
+# Linear Discriminant Analysis (LDA)
+set.seed(99)
+lda.bcancer = train(class~., data=bcancer, method="lda", metric=metric, trControl=control)
+
+# Classfication and Regression Trees (CART)
+set.seed(99)
+cart.bcancer = train(class~., data=bcancer, method="rpart", metric=metric, trControl=control)
+
+# k-Nearest Neighbors (KNN)
+set.seed(99)
+knn.bcancer = train(class~., data=bcancer, method="knn", metric=metric, trControl=control)
+
+# Bayesian Generalized Linear Model 
+set.seed(99)
+bay.bcancer = train(class~., data=bcancer, method="bayesglm", metric=metric, trControl=control)
+
+# Support Vector Machines (SVM) --> a long long time
+set.seed(99)
+svm.bcancer = train(class~., data=bcancer, method="svmRadial", metric=metric, trControl=control)
+
+# Random Forest
+set.seed(99)
+rf.bcancer = train(class~., data=bcancer, method="rf", metric=metric, trControl=control)
+
+# Gradient Boosting Machines/XGBoost
+set.seed(99)
+xgb.bcancer = train(class~., data=bcancer, method="xgbLinear", metric=metric, trControl=control)
+```
+Summarize accuracy of models
+```{r}
+results = resamples(list(lda=lda.bcancer, cart=cart.bcancer, knn=knn.bcancer, logi=bay.bcancer, svm=svm.bcancer, rf=rf.bcancer, xgb=xgb.bcancer))
+summary(results)
+```
+Summarize best model. The random forest model is the best model of the 7 models I ran the 10 fold cross validation on. It has the highest mean accuracy and highest mean kappa. The random forest model is a higher performing model compared to the other models listed. 
+```{r}
+print(rf.bcancer)
+```
+
